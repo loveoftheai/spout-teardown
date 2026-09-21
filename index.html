@@ -35,11 +35,11 @@ hr{border:none;border-top:1px solid var(--line);margin:34px 0}
 <hr />
 <h2>0. TL;DR</h2>
 <p>Spout is a three-sided machine: borrowers lock tokenized US equities and draw stablecoins at 0% APR / 50% LTV; a rules-based engine writes weekly covered calls against the pooled collateral; lenders' stablecoins fund the loans and get paid 80% of the premium. The design is cleaner than most "RWA DeFi" attempts — pool-level options execution, an explicit loss waterfall, earnings-week cycle skips, and conservative oracle handling are all genuinely good engineering.</p>
-<p>But "0% APR" is a pricing decision, not a free lunch. The borrower pays in <strong>capped convexity</strong> on a roster deliberately loaded with high-beta names (NVDA, MSTR, SMCI), plus a 4–12.5% liquidation fee and 20 bps of transfer friction. On this roster, in this market regime, the expected cost of giving up call-side upside can plausibly <strong>exceed</strong> a conventional 6% margin rate. And three structural risks deserve more attention than the docs give them: <strong>utilization dependency of the Senior 7% priority, the weekend gap on BTC-correlated collateral, and one collateral asset (bSOL) that appears misclassified and may not be optionable at all.</strong></p>
+<p>But "0% APR" is a pricing decision, not a free lunch. The borrower pays in <strong>capped convexity</strong> on a roster deliberately loaded with high-beta names (NVDA, MSTR, SMCI), plus a 4–12.5% liquidation fee and 20 bps of transfer friction. On this roster, in this market regime, the expected cost of giving up call-side upside can plausibly <strong>exceed</strong> a conventional 6% margin rate. And three structural risks deserve more attention than the docs give them: <strong>utilization dependency of the Senior 7% priority, the weekend gap on BTC/SOL-beta collateral, and one collateral asset (BSOL, the Bitwise Solana staking ETF) whose embedded staking-yield attribution and thin young-ETF options book the docs don't address.</strong></p>
 <p>Verdict scores (their rubric): Product insight — see §4–§6. DeFi/tokenization analysis — §2–§3. UX feedback — §7 (testnet walkthrough; see caveat). Content — you're reading it.</p>
 <hr />
 <h2>1. What Spout actually is, in one diagram</h2>
-<pre><code>        BORROWER                     OPTIONS ENGINE                  LENDER
+<p><code>BORROWER                     OPTIONS ENGINE                  LENDER
    lock spAssets (Token-2022,  ──►  pool collateral per asset  ──►  write weekly OTM
    KYC-gated transfer hook)         (100-share contracts,             covered calls at a
         │                           pool-level, pro-rata)             regulated US venue
@@ -52,8 +52,7 @@ hr{border:none;border-top:1px solid var(--line);margin:34px 0}
    assignment → shares sold          Monday 9am ET settle         Senior 7% priority +
    at strike; Auto-Roll rebuys                                    25% of excess;
    by default                                                     Junior gets rest
-                                                                  (~9% / ~32% APY)
-</code></pre>
+                                                                  (~9% / ~32% APY)</code></p>
 <p>The 11-asset launch roster: AAPL, NVDA, GOOG, SMCI, IBIT, MSTR, BSOL, PFE, GS, XOM, GLD. Flat 50% max LTV across all assets; liquidation thresholds per asset (buffers 4%–12.5% above 50%).</p>
 <h2>2. The core question: what does "0% APR" really cost?</h2>
 <p>Spout's framing: the collateral is productive, the calls fund the lenders, so the borrower pays no coupon. True as far as it goes. But the borrower pays four other things:</p>
@@ -78,15 +77,15 @@ hr{border:none;border-top:1px solid var(--line);margin:34px 0}
 </ul>
 <p>Scenario: Saturday BTC −15%. MSTR/IBIT collateral values gap down hard; nothing can be liquidated or hedged until Sunday-night/Monday; the market open then concentrates assignment + liquidation + rebuy flows into one session, on the exact assets with the widest buffers. The loss waterfall (Insurance Fund → Junior → Senior) is well-designed for this, but the <strong>trigger frequency is systematically underestimated by looking at equity-market history alone</strong>.</p>
 <p><strong>Recommendation C:</strong> for BTC/SOL-beta collateral, either (a) cut max LTV below 50% (e.g. 40%), (b) hold a slice of premium for weekend protection (listed BTC options trade 24/7 on some venues; SOL proxies via CME/ETF options don't), or (c) mark those assets continuously with crypto-market oracles on weekends. The flat-50% "simplicity" argument is inconsistent with the engine's own per-asset strike tuning — the protocol already treats assets individually everywhere else.</p>
-<h2>5. bSOL: a misclassified — possibly non-optionable — collateral asset</h2>
-<p>The supported-collateral table lists <strong>BSOL as "Solana Exposure — ETF, newer listing, shorter history."</strong> As far as I can establish, <strong>bSOL is the BlazeStake liquid staking token (an LST), not an ETF</strong> — no US-listed ETF with that ticker exists to my knowledge.</p>
-<p>This matters beyond a docs typo:</p>
+<h2>5. BSOL: the classification is right — the open questions are yield attribution and options depth</h2>
+<p>The supported-collateral table lists <strong>BSOL as "Solana Exposure — ETF, newer listing, shorter history."</strong> An early draft of this teardown read that as a misclassification — bSOL is also the ticker of the BlazeStake liquid staking token, and I could not place a US ETF under that ticker. <strong>That reading was wrong, and it's corrected here:</strong> BSOL is the Bitwise Solana Staking ETF (NYSE Arca, listed Oct 28, 2025 — the first US spot-Solana ETP). Spout's row is accurate, including the honest "newer listing, shorter history" caveat; a protocol that lists a young ETF and labels it as such is doing disclosure right.</p>
+<p>Two real questions remain for this asset:</p>
 <ol>
-<li><strong>Covered calls need an optionable underlying.</strong> A regulated US options venue cannot write calls on an LST. If the engine writes SOL-linked options (e.g., on a SOL ETF) against bSOL collateral, the protocol carries <strong>basis risk</strong> (bSOL/SOL exchange rate + LST depeg vs. ETF price) that is unhedged and undocumented.</li>
-<li><strong>Risk classification drives parameters.</strong> An LST carries smart-contract, validator-set, and depeg risk that an ETF does not, and it reprices 24/7 (see §4). Grouping it with ETFs ("no earnings skip needed") suggests the risk framework wasn't applied to it as an LST.</li>
-<li>If it <em>is</em> some ETF I'm not aware of, the docs should say which issuer — the same way IBIT is identifiable.</li>
+<li><strong>Whose staking yield?</strong> BSOL is a <em>staking</em> ETF: its NAV accrues SOL staking rewards net of its expense ratio, continuously. The docs' "productive collateral" story credits borrowers through the options cycle only. But when BSOL shares sit as locked collateral, the embedded staking yield keeps accruing inside the position — and the fee/docs pages never say whether that accrual is credited to the borrower's position, shared with lenders through the engine's economics, or simply stays in the share price (mechanically it's the borrower's asset, but one explicit sentence would settle it). Disclosure here is cheap and would pre-empt the question from every DeFi-native reviewer.</li>
+<li><strong>Options depth on an 11-month-old ETF.</strong> The engine's edge depends on execution quality: weekly covered calls at "meaningfully OTM" strikes need tight spreads and a dense strike grid. Options books on young ETFs — even fast-scaling ones — are thinner than the AAPL/NVDA/GLD books on this roster; wider spreads mean the engine's realized premium on BSOL cycles will lag clean "listed-market norms" backtest numbers. The per-asset cycle cadence is published in-app; publishing per-asset <strong>realized spread and fill quality</strong> would be the trust move — starting with the asset whose history is shortest.</li>
 </ol>
-<p><strong>Recommendation D:</strong> either delist bSOL until there's a clean hedging instrument and an LST-specific risk framework, or document exactly what instrument the engine trades against it and who bears basis risk. Right now it's the one asset where "the collateral is productive" may not even be mechanically true.</p>
+<p>§4's weekend-gap point survives unchanged for this asset: SOL reprices 24/7 while BSOL marks update at reduced frequency off-hours and the hedging venue is closed.</p>
+<p><strong>Recommendation D:</strong> state explicitly whose account BSOL's embedded staking yield accrues to while shares are locked, and publish per-asset realized spread/fill quality (BSOL first). The honest labeling is already done; these two disclosures would finish the job.</p>
 <h2>6. What the design gets right (worth saying)</h2>
 <ul>
 <li><strong>Pool-level execution</strong> opens a 100-share-contract strategy to 5-share holders, and pro-rata assignment allocation is fair variance-sharing. This is the correct architecture.</li>
@@ -134,8 +133,8 @@ hr{border:none;border-top:1px solid var(--line);margin:34px 0}
 </tr>
 <tr>
 <td>D</td>
-<td>Fix or delist bSOL; document the hedging instrument + basis-risk bearer</td>
-<td>§5 — currently the model may not hold for this asset</td>
+<td>State whose account BSOL's embedded staking yield accrues to; publish per-asset realized spread/fill quality</td>
+<td>§5 — yield attribution + young-ETF options depth are the open questions</td>
 </tr>
 <tr>
 <td>E</td>
@@ -162,8 +161,8 @@ hr{border:none;border-top:1px solid var(--line);margin:34px 0}
 <h2>9. Competitive position</h2>
 <p>Nearest neighbors: (a) brokerage margin (IBKR ~5.5–7% with full upside, but offchain and custody-with-broker), (b) covered-call ETFs (JEPI/QYLD-style: VRP harvest, no borrowing attached), (c) tokenized-equity venues (xStocks/Backpack: transferability, no native borrowing). Spout's actual moat is <strong>the options desk operations + broker integration</strong>, not the chain — Solana gives settlement and the Token-2022 KYC hook, but the hard part (running weekly disciplined calls through a regulated venue, reconciling broker state onchain) is an ops capability competitors can't fork from GitHub. That's also the right frame for the token: value accrual is protocol-fee-on-premium, which scales with real flow, not with emissions.</p>
 <h2>10. Verdict</h2>
-<p>Spout is the most internally-consistent tokenized-equity borrowing design I've seen ship to a public testnet: the flywheel is real, the risk stack is explicit, and the docs mostly resist the urge to hide the load-bearing numbers. Its three weakest points are (1) a headline price ("0%") that hides a regime-dependent convexity cost on a deliberately high-beta roster, (2) a Senior yield that is structurally utilization-dependent but marketed as a fixed priority, and (3) one collateral asset whose classification, hedging instrument, and basis-risk bearer are all unclear. Fix A–D before mainnet and the story holds together; ship without them and the first MSTR-assignment wave or thin-premium month will write the teardown for you.</p>
+<p>Spout is the most internally-consistent tokenized-equity borrowing design I've seen ship to a public testnet: the flywheel is real, the risk stack is explicit, and the docs mostly resist the urge to hide the load-bearing numbers. Its three weakest points are (1) a headline price ("0%") that hides a regime-dependent convexity cost on a deliberately high-beta roster, (2) a Senior yield that is structurally utilization-dependent but marketed as a fixed priority, and (3) one collateral asset (BSOL) whose embedded staking-yield attribution and young-ETF options depth the docs don't address. Fix A–D before mainnet and the story holds together; ship without them and the first MSTR-assignment wave or thin-premium month will write the teardown for you.</p>
 <hr />
-<p><em>Method note: analysis is based on Spout's public docs (spout.finance/docs), site, and onchain-public information as of Sep 21, 2026; premium-rate sanity checks use listed-options market norms. Not investment advice. Testnet walkthrough pending credentials; will be appended.</em></p>
+<p><em>Method note: analysis is based on Spout's public docs (spout.finance/docs), site, and onchain-public information as of Sep 21, 2026; premium-rate sanity checks use listed-options market norms. Not investment advice. Testnet walkthrough pending credentials; will be appended. §5 was corrected on Sep 21 after fact-checking — an early draft misread BSOL as the BlazeStake LST; it is the Bitwise Solana Staking ETF. The correction is also posted in the X thread.</em></p>
 <footer style="margin-top:60px;color:#5a6474;font-size:13px">Analysis by <a href="https://x.com/wuwei2022">@wuwei2022</a> · Prepared for the Spout Finance Beta Intelligence Challenge · <a href="https://loveoftheai.github.io/demo-videos/">demo-video desk</a></footer>
 </div></body></html>

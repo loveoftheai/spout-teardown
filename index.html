@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Stress-Testing Spout's 0% APR — a teardown</title>
+<meta name="description" content="Where the money actually comes from: economics, protocol design, and UX of Spout Finance's tokenized-equity borrowing model."/>
+<style>
+:root{--bg:#0d1016;--card:#141821;--fg:#e8eef4;--dim:#8a94a6;--teal:#5eead4;--line:#262d3a}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font:17px/1.7 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:48px 20px 90px}
+h1{font-size:clamp(26px,4.5vw,38px);line-height:1.2;margin:14px 0 10px}
+h3{color:var(--teal);font-size:15px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+h2{font-size:23px;margin:44px 0 14px;padding-top:10px;border-top:1px solid var(--line)}
+p{margin:12px 0;color:var(--fg)}
+li{margin:7px 0 7px 22px;color:var(--fg)}
+code,pre{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13.5px}
+pre{background:#0b0e13;border:1px solid var(--line);border-radius:10px;padding:16px;overflow-x:auto;margin:16px 0;line-height:1.45}
+code{background:#0b0e13;border-radius:4px;padding:1px 5px}
+pre code{padding:0;background:none}
+blockquote{border-left:3px solid var(--gold,#f0b050);background:var(--card);padding:12px 16px;border-radius:0 10px 10px 0;margin:16px 0;color:var(--dim)}
+blockquote p{color:var(--dim)}
+table{border-collapse:collapse;width:100%;margin:16px 0;font-size:15px}
+th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{color:var(--teal);background:var(--card)}
+td{color:var(--fg)}
+em{color:var(--dim)}
+strong{color:#fff}
+a{color:var(--teal)}
+hr{border:none;border-top:1px solid var(--line);margin:34px 0}
+.meta{color:var(--dim);font-size:14px}
+</style></head><body><div class="wrap">
+<h1>Stress-Testing Spout's 0% APR: Where the Money Actually Comes From</h1>
+<h3>A teardown of Spout Finance's tokenized-equity borrowing model — economics, protocol design, and UX</h3>
+<p><em>Justin · September 2026 · Prepared for the Spout Finance Beta Intelligence Challenge</em></p>
+<hr />
+<h2>0. TL;DR</h2>
+<p>Spout is a three-sided machine: borrowers lock tokenized US equities and draw stablecoins at 0% APR / 50% LTV; a rules-based engine writes weekly covered calls against the pooled collateral; lenders' stablecoins fund the loans and get paid 80% of the premium. The design is cleaner than most "RWA DeFi" attempts — pool-level options execution, an explicit loss waterfall, earnings-week cycle skips, and conservative oracle handling are all genuinely good engineering.</p>
+<p>But "0% APR" is a pricing decision, not a free lunch. The borrower pays in <strong>capped convexity</strong> on a roster deliberately loaded with high-beta names (NVDA, MSTR, SMCI), plus a 4–12.5% liquidation fee and 20 bps of transfer friction. On this roster, in this market regime, the expected cost of giving up call-side upside can plausibly <strong>exceed</strong> a conventional 6% margin rate. And three structural risks deserve more attention than the docs give them: <strong>utilization dependency of the Senior 7% priority, the weekend gap on BTC-correlated collateral, and one collateral asset (bSOL) that appears misclassified and may not be optionable at all.</strong></p>
+<p>Verdict scores (their rubric): Product insight — see §4–§6. DeFi/tokenization analysis — §2–§3. UX feedback — §7 (testnet walkthrough; see caveat). Content — you're reading it.</p>
+<hr />
+<h2>1. What Spout actually is, in one diagram</h2>
+<pre><code>        BORROWER                     OPTIONS ENGINE                  LENDER
+   lock spAssets (Token-2022,  ──►  pool collateral per asset  ──►  write weekly OTM
+   KYC-gated transfer hook)         (100-share contracts,             covered calls at a
+        │                           pool-level, pro-rata)             regulated US venue
+        ▼                                      │                              │
+   borrow ≤50% LTV in stables                   ▼                              ▼
+   at 0% interest                        premium collected          20% protocol fee
+        │                                      │              (Insurance Fund +
+        ▼                                      ▼               ops + treasury)
+   repay anytime;                    Friday expiry →              80% to lenders:
+   assignment → shares sold          Monday 9am ET settle         Senior 7% priority +
+   at strike; Auto-Roll rebuys                                    25% of excess;
+   by default                                                     Junior gets rest
+                                                                  (~9% / ~32% APY)
+</code></pre>
+<p>The 11-asset launch roster: AAPL, NVDA, GOOG, SMCI, IBIT, MSTR, BSOL, PFE, GS, XOM, GLD. Flat 50% max LTV across all assets; liquidation thresholds per asset (buffers 4%–12.5% above 50%).</p>
+<h2>2. The core question: what does "0% APR" really cost?</h2>
+<p>Spout's framing: the collateral is productive, the calls fund the lenders, so the borrower pays no coupon. True as far as it goes. But the borrower pays four other things:</p>
+<ol>
+<li><strong>Capped convexity.</strong> Strikes are set "meaningfully OTM" (their worked MSTR example: strike ~8% above spot on a weekly). If the underlying rips past the strike, your shares are sold at the strike. Docs state the historical assignment drag is ~0.5% annualized — plausible for a diversified book in calm regimes. But the roster is <em>concentrated in exactly the names where weekly &gt;8% moves are common</em>: NVDA, SMCI, MSTR, IBIT. Conditional on a strong-bull regime (the last 24 months), assignment frequency on this roster is much higher than on an index book. Expected cost of the cap is not 0.5%/yr in a momentum regime; it's regime-dependent and can be multiples of that. <strong>A 6% margin loan with full upside can be cheaper than a 0% loan with weekly-capped upside on MSTR.</strong> This is the single most important thing a borrower must understand, and the app's "0%" headline works against it.</li>
+<li><strong>Liquidation fee = the asset's buffer (4%–12.5%)</strong> charged on the collateral sold at liquidation. In their own NVDA worked example, ~$992 of an ~$2,184 partial liquidation — <strong>a ~45% take of the liquidation event</strong> (8.8% buffer × the sold slice, but effectively nearly half the event's proceeds in fees in that example's arithmetic). Docs don't specify the split between Insurance Fund and protocol revenue. That should be disclosed.</li>
+<li><strong>20 bps round-trip</strong> on spAsset mint/redeem (buy/sell inside the app).</li>
+<li><strong>KYC-gated transferability</strong> (Token-2022 transfer hook): spAssets cannot move to non-verified wallets, so secondary liquidity is ~zero and exit routes run through Spout redemption. You pay in optionality of exit.</li>
+</ol>
+<p><strong>Recommendation A:</strong> show borrowers a "true cost of borrowing" estimate per asset — implied coupon = expected assignment drag + fee drag under 2–3 vol regimes — next to the 0% headline. The tool that tells users when a margin loan is cheaper builds more trust than any marketing.</p>
+<h2>3. Is the Senior 7% priority actually fundable? (The utilization dependency)</h2>
+<p>The settlement math: Senior's 7% annualized priority (~$11.5k/week per $8.5m of Senior) is payable <strong>only from premium actually collected</strong> — and premium scales with <strong>collateral locked by borrowers</strong>, not with deposits. The docs' own $30k/week gross example implicitly assumes a healthy borrowed-against collateral pool.</p>
+<p>Sanity check with listed-market numbers: 1-week ~8% OTM calls on liquid large caps yield roughly 0.2–0.6% of notional per week; on high-vol names 1–2%. For a $10m lending pool where Senior alone needs ~$11.5k/week, the engine needs roughly $2–6m of <em>actively cycled</em> collateral at listed-market premium rates (more if strikes are as distant as claimed). That's achievable — but only at high lock utilization.</p>
+<p>The failure mode is quiet: <strong>if borrow demand lags deposits</strong>, premium per lender-week thins out, Senior shortfalls get "noted and topped up from Insurance Fund surplus," and the fund meant for tail losses becomes a yield-smoothing account. The docs are honest that this is possible; the product implication is that Senior APY marketing (a stable "7% priority") should be displayed as <strong>variable, premium-funded</strong> — because it structurally is.</p>
+<p><strong>Recommendation B:</strong> publish a live "engine dashboard": collateral locked vs. deposits (utilization), rolling 4-week premium collected, current strikes per asset, Insurance Fund balance vs. 2% target, drawdown history. The docs promise this in-app; making it public-web would pre-answer the skeptics (including this one).</p>
+<h2>4. Weekend gap: the protocol's structural blind spot</h2>
+<p>The engine runs weekly cycles entered Friday open, expiring Friday close, against <strong>equities that trade 5×8</strong> — but three of eleven collateral types (MSTR, IBIT, and bSOL) are effectively <strong>BTC/SOL beta that reprices 24/7</strong>:</p>
+<ul>
+<li>Collateral marks update at "reduced frequency" outside US market hours;</li>
+<li>Liquidations and new borrows pause on stale/failing feeds (good conservatism — but it means weekend BTC crashes don't get processed until Monday);</li>
+<li>The options that would hedge the exposure <strong>cannot be traded until Monday open</strong>.</li>
+</ul>
+<p>Scenario: Saturday BTC −15%. MSTR/IBIT collateral values gap down hard; nothing can be liquidated or hedged until Sunday-night/Monday; the market open then concentrates assignment + liquidation + rebuy flows into one session, on the exact assets with the widest buffers. The loss waterfall (Insurance Fund → Junior → Senior) is well-designed for this, but the <strong>trigger frequency is systematically underestimated by looking at equity-market history alone</strong>.</p>
+<p><strong>Recommendation C:</strong> for BTC/SOL-beta collateral, either (a) cut max LTV below 50% (e.g. 40%), (b) hold a slice of premium for weekend protection (listed BTC options trade 24/7 on some venues; SOL proxies via CME/ETF options don't), or (c) mark those assets continuously with crypto-market oracles on weekends. The flat-50% "simplicity" argument is inconsistent with the engine's own per-asset strike tuning — the protocol already treats assets individually everywhere else.</p>
+<h2>5. bSOL: a misclassified — possibly non-optionable — collateral asset</h2>
+<p>The supported-collateral table lists <strong>BSOL as "Solana Exposure — ETF, newer listing, shorter history."</strong> As far as I can establish, <strong>bSOL is the BlazeStake liquid staking token (an LST), not an ETF</strong> — no US-listed ETF with that ticker exists to my knowledge.</p>
+<p>This matters beyond a docs typo:</p>
+<ol>
+<li><strong>Covered calls need an optionable underlying.</strong> A regulated US options venue cannot write calls on an LST. If the engine writes SOL-linked options (e.g., on a SOL ETF) against bSOL collateral, the protocol carries <strong>basis risk</strong> (bSOL/SOL exchange rate + LST depeg vs. ETF price) that is unhedged and undocumented.</li>
+<li><strong>Risk classification drives parameters.</strong> An LST carries smart-contract, validator-set, and depeg risk that an ETF does not, and it reprices 24/7 (see §4). Grouping it with ETFs ("no earnings skip needed") suggests the risk framework wasn't applied to it as an LST.</li>
+<li>If it <em>is</em> some ETF I'm not aware of, the docs should say which issuer — the same way IBIT is identifiable.</li>
+</ol>
+<p><strong>Recommendation D:</strong> either delist bSOL until there's a clean hedging instrument and an LST-specific risk framework, or document exactly what instrument the engine trades against it and who bears basis risk. Right now it's the one asset where "the collateral is productive" may not even be mechanically true.</p>
+<h2>6. What the design gets right (worth saying)</h2>
+<ul>
+<li><strong>Pool-level execution</strong> opens a 100-share-contract strategy to 5-share holders, and pro-rata assignment allocation is fair variance-sharing. This is the correct architecture.</li>
+<li><strong>Earnings-week skip</strong> (no cycles through single-name earnings) removes the worst gap risk for borrowers. Simple, disciplined, rare in retail structured products.</li>
+<li><strong>The loss waterfall is explicit</strong> — Insurance Fund (protocol-first-loss, 2% target) → Junior (15%, second loss, 45-day notice) → Senior last. Compare the opacity of most "RWA yield" products.</li>
+<li><strong>Oracle conservatism</strong>: staleness/deviation checks pausing <em>liquidations</em> (not just borrows) protects against manipulation-induced liquidations — the right tradeoff, rarely chosen.</li>
+<li><strong>Exit design</strong> (instant-withdrawal reserve at 0–3% dynamic haircut / FIFO queue / claim resale) shows real thought about bank-run dynamics; the anti-run incentive is correctly aligned.</li>
+<li><strong>Honest-ish docs</strong>: risks page names Senior-principal loss, broker counterparty, and stablecoin risk plainly. The FAQ's "0.5% annualized" assignment cost is the kind of number most marketing pages wouldn't publish.</li>
+</ul>
+<h2>7. UX friction log (testnet walkthrough)</h2>
+<blockquote>
+<p>⚠️ Caveat: my hands-on section is pending testnet credentials (requested via the earn listing and X on Sep 21). The items below are from the public funnel and docs; the published version will add full testnet flows with screenshots if access is granted before the bounty closes.</p>
+</blockquote>
+<ol>
+<li><strong>The gate itself</strong>: beta requires an emailed email+passcode pair, obtainable only via Telegram (@SpoutHelp). For a Solana-native product, gating testnet (where funds are worthless) behind a Telegram Vettable channel is heavy friction; a wallet-based gate (sign a message, get a code) would be one-click for the exact audience.</li>
+<li><strong>app.spout.finance returned Cloudflare 522 (origin timeout)</strong> during my testing window (Sep 21 ~06:51 UTC) — reliability signal worth noting pre-launch.</li>
+<li><strong>Auto-Roll defaults ON.</strong> Assignment → auto-rebuy at the higher price + re-enroll. For a borrower who doesn't read docs, the first experience of "my NVDA got sold and rebought slightly smaller" will be a support ticket. At minimum, surface the Auto-Roll state on the position card, not in settings.</li>
+<li><strong>Health Factor is the right primitive</strong> — but "no cost to being close to the line" (docs) is only true until the liquidation fee = buffer design kicks in; the two framings sit awkwardly together. The UI should show the <em>dollar</em> liquidation fee the current buffer implies, live.</li>
+<li><strong>KYC forks the funnel</strong>: Path A (buy inside app, KYC) vs Path B (deposit existing xStocks/Ondo tokens, no KYC). Fine — but the fee table's "0.20% applies when you buy or sell spAssets through the app" doesn't clarify whether Path B deposits ever pay it (docs suggest not). One sentence would fix it.</li>
+</ol>
+<h2>8. Feature recommendations (prioritized)</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Recommendation</th>
+<th>Why it matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A</td>
+<td>"True cost of borrowing" estimator next to the 0% headline</td>
+<td>The product's core claim hides its real price; transparency converts skeptics</td>
+</tr>
+<tr>
+<td>B</td>
+<td>Public engine dashboard (utilization, premium history, strikes, insurance fund)</td>
+<td>Trust for lenders; pre-answers the §3 question</td>
+</tr>
+<tr>
+<td>C</td>
+<td>Sub-50% LTV or weekend marks for BTC/SOL-beta collateral</td>
+<td>Closes the §4 structural gap</td>
+</tr>
+<tr>
+<td>D</td>
+<td>Fix or delist bSOL; document the hedging instrument + basis-risk bearer</td>
+<td>§5 — currently the model may not hold for this asset</td>
+</tr>
+<tr>
+<td>E</td>
+<td>Liquidation-fee split disclosure (Insurance Fund vs. protocol revenue)</td>
+<td>Fee goes to "a slice" of the fund — how big is the slice?</td>
+</tr>
+<tr>
+<td>F</td>
+<td>Name the custodian broker + options venue</td>
+<td>Counterparty risk is named but not identified; disclosure is cheap trust</td>
+</tr>
+<tr>
+<td>G</td>
+<td>Auto-Roll state on the position card; first-assignment consent moment</td>
+<td>Prevents the most predictable support/regret pattern</td>
+</tr>
+<tr>
+<td>H</td>
+<td>Consider allowlisted secondary pool for KYC'd wallets</td>
+<td>Gives spAssets exit liquidity without the 20 bps redemption funnel</td>
+</tr>
+</tbody>
+</table>
+<h2>9. Competitive position</h2>
+<p>Nearest neighbors: (a) brokerage margin (IBKR ~5.5–7% with full upside, but offchain and custody-with-broker), (b) covered-call ETFs (JEPI/QYLD-style: VRP harvest, no borrowing attached), (c) tokenized-equity venues (xStocks/Backpack: transferability, no native borrowing). Spout's actual moat is <strong>the options desk operations + broker integration</strong>, not the chain — Solana gives settlement and the Token-2022 KYC hook, but the hard part (running weekly disciplined calls through a regulated venue, reconciling broker state onchain) is an ops capability competitors can't fork from GitHub. That's also the right frame for the token: value accrual is protocol-fee-on-premium, which scales with real flow, not with emissions.</p>
+<h2>10. Verdict</h2>
+<p>Spout is the most internally-consistent tokenized-equity borrowing design I've seen ship to a public testnet: the flywheel is real, the risk stack is explicit, and the docs mostly resist the urge to hide the load-bearing numbers. Its three weakest points are (1) a headline price ("0%") that hides a regime-dependent convexity cost on a deliberately high-beta roster, (2) a Senior yield that is structurally utilization-dependent but marketed as a fixed priority, and (3) one collateral asset whose classification, hedging instrument, and basis-risk bearer are all unclear. Fix A–D before mainnet and the story holds together; ship without them and the first MSTR-assignment wave or thin-premium month will write the teardown for you.</p>
+<hr />
+<p><em>Method note: analysis is based on Spout's public docs (spout.finance/docs), site, and onchain-public information as of Sep 21, 2026; premium-rate sanity checks use listed-options market norms. Not investment advice. Testnet walkthrough pending credentials; will be appended.</em></p>
+<footer style="margin-top:60px;color:#5a6474;font-size:13px">Analysis by <a href="https://x.com/wuwei2022">@wuwei2022</a> · Prepared for the Spout Finance Beta Intelligence Challenge · <a href="https://loveoftheai.github.io/demo-videos/">demo-video desk</a></footer>
+</div></body></html>
